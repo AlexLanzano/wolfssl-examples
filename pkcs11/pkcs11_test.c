@@ -272,7 +272,7 @@ int get_public_key(RsaKey* key, Pkcs11Token* token, CK_SESSION_HANDLE session,
     int ret = 0;
     unsigned char* mod = NULL;
     unsigned char* exp = NULL;
-    int modSz, expSz;
+    int modSz = 0, expSz = 0;
     CK_ATTRIBUTE template[] = {
       {CKA_MODULUS, NULL_PTR, 0},
       {CKA_PUBLIC_EXPONENT, NULL_PTR, 0}

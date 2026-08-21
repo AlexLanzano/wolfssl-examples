@@ -159,6 +159,114 @@ See [PKCS11.md](./PKCS11.md) in this folder.
     It should be noted WOLFSSL_PKCS11_RW_TOKENS is only needed for adding the keys and certs to the store. Once already in the store this is no longer needed.
 
 
+## Setting up and testing OP-TEE
+
+[OP-TEE](https://optee.readthedocs.io/) provides a PKCS #11 trusted
+application, so private keys can be generated and used inside the TrustZone
+secure world and never appear in normal-world memory. This has been tested on
+an NXP i.MX95 running OP-TEE 4.4, but nothing here is board specific.
+
+1. Build OP-TEE with the PKCS #11 trusted application
+
+    The TA is not in every OP-TEE build. Enable it with `CFG_PKCS11_TA=y` and
+    install the resulting `fd02c9da-306c-48c7-a49c-bbd827ae86ee.ta` where
+    `tee-supplicant` looks for TAs. You also need the `optee_client` userspace:
+    `tee-supplicant`, `libteec.so.2` and `libckteec.so.0`.
+
+2. Make sure `tee-supplicant` is running
+
+    Every PKCS #11 call fails at `C_Initialize` without it, because the TA
+    cannot be loaded. If the libraries are not in the default library path,
+    point the loader at them:
+
+    ```
+    export LD_LIBRARY_PATH=/path/to/optee/lib
+    tee-supplicant -l /path/to/ta/dir &
+    ```
+
+3. Change to wolfssl directory
+
+    ```
+    ./autogen.sh
+    ./configure --enable-pkcs11 --enable-cryptocb-rsa-pad
+    make
+    sudo make install
+    ```
+
+    `--enable-cryptocb-rsa-pad` matters. Without it wolfSSL asks the token for
+    raw RSA (`CKM_RSA_X_509`), which OP-TEE's TA does not implement, and RSA
+    private key operations fail with `RSA_BUFFER_E` (-131). With it wolfSSL
+    uses `CKM_RSA_PKCS` and the RSA examples pass. The same applies to any
+    token that declines raw RSA.
+
+4. Change to wolfssl-examples/pkcs11 directory and build
+
+    ```
+    make
+    ```
+
+5. Initialize the token and run the examples
+
+    OP-TEE tokens come up uninitialized and OP-TEE ships no equivalent of
+    `softhsm2-util`, so `pkcs11_inittoken` does it through the PKCS #11 API:
+
+    ```
+    ./optee-init.sh
+    ```
+
+    That initializes slot 0 and then runs the examples. To use a different
+    slot, label or PIN:
+
+    ```
+    OPTEE_TOKEN=myToken OPTEE_PIN=1234 ./optee-init.sh 1
+    ```
+
+    Once the token is initialized, run the examples on their own with:
+
+    ```
+    ./optee.sh
+    ```
+
+    Or a single example directly, with the usual argument order:
+
+    ```
+    ./pkcs11_genecc libckteec.so.0 0 wolfSSL cryptoki
+    ```
+
+### EC keys that both derive and sign
+
+`pkcs11_test` generates a single EC key and then uses it for both ECDH and
+ECDSA. PKCS #11 leaves the defaults for `CKA_DERIVE` and `CKA_SIGN` up to the
+token: SoftHSM grants both regardless of the template, while OP-TEE grants only
+what was asked for.
+
+The examples therefore request both explicitly:
+
+```c
+wc_ecc_make_key_ex2(&rng, 32, key, ECC_CURVE_DEF, EC_KEYGEN_FLAGS);
+```
+
+`EC_KEYGEN_FLAGS` is `WC_ECC_FLAG_DEC_SIGN | WC_ECC_FLAG_DERIVE` when the
+installed wolfSSL has `WC_ECC_FLAG_DERIVE`, and `WC_ECC_FLAG_DEC_SIGN` alone
+when it does not. No edit is needed either way: the Makefile probes for the
+flag by compiling against the installed headers and defines
+`HAVE_WC_ECC_FLAG_DERIVE` when it is present.
+
+The probe exists because neither of the usual tests works here.
+`WC_ECC_FLAG_DERIVE` is an enum member rather than a macro, so `#ifdef` cannot
+see it, and a version test cannot distinguish the two cases either, because
+wolfSSL master and v5.9.2-stable both report `LIBWOLFSSL_VERSION_HEX`
+`0x05009002`.
+
+Against a wolfSSL without the flag the key is generated sign-only, which is all
+that library can request. `pkcs11_test` then fails on a strict token - the
+OP-TEE TA among them - at the first ECDH operation with
+`CKR_KEY_FUNCTION_NOT_PERMITTED`, surfacing as `WC_HW_E` (-248). Tokens that
+enable `CKA_DERIVE` by default are unaffected.
+
+All the examples pass, including RSA key generation, ECDSA, ECDH, AES-CBC,
+AES-GCM, HMAC and RNG.
+
 ## TLS Server Example with SoftHSM (RSA)
 
 The example `server-tls-pkcs11` is a server that uses a private key that has been stored on the PKCS #11 device.
